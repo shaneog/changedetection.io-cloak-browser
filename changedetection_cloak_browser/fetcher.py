@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import hashlib
 import json
 import os
 from urllib.parse import urlparse
@@ -194,7 +195,7 @@ def register_content_fetcher():
             url=None,
             watch_uuid=None,
         ):
-            from cloakbrowser import launch_async
+            from cloakbrowser import launch_async, launch_persistent_context_async
             import time
 
             self.delete_browser_steps_screenshots()
@@ -215,26 +216,75 @@ def register_content_fetcher():
             geoip_raw = os.getenv('CLOAKBROWSER_GEOIP', 'false').lower()
             geoip = geoip_raw not in ('false', '0', 'no')
 
+            persistent_raw = os.getenv('CLOAKBROWSER_PERSISTENT', 'false').lower()
+            persistent = persistent_raw not in ('false', '0', 'no')
+
             try:
-                browser = await launch_async(
-                    headless=headless,
-                    proxy=proxy_url,
-                    humanize=humanize,
-                    geoip=geoip,
-                )
+                if persistent:
+                    # One persistent browser profile per watch. This keeps cookies,
+                    # localStorage, IndexedDB, cache, service workers, etc. stable
+                    # between checks while avoiding cross-watch profile locking.
+                    profile_key = watch_uuid or 'default'
+                    profile_base = os.getenv(
+                        'CLOAKBROWSER_PROFILE_DIR',
+                        '/datastore/cloak-profiles',
+                    )
+                    profile_dir = os.path.join(profile_base, profile_key)
+                    os.makedirs(profile_dir, exist_ok=True)
 
-                # CloakBrowser returns standard Playwright browser objects —
-                # new_context() and all page methods work identically to Playwright
-                context = await browser.new_context(
-                    accept_downloads=False,
-                    bypass_csp=True,
-                    extra_http_headers=request_headers or {},
-                    ignore_https_errors=True,
-                    service_workers=os.getenv('PLAYWRIGHT_SERVICE_WORKERS', 'allow'),
-                    user_agent=manage_user_agent(headers=request_headers or {}),
-                )
+                    # CloakBrowser normally generates a new fingerprint on every
+                    # launch. A persistent profile should also look like the same
+                    # returning device, so derive a deterministic seed per watch.
+                    digest = hashlib.sha256(profile_key.encode('utf-8')).hexdigest()
+                    fingerprint_seed = 10000 + (int(digest[:8], 16) % 90000)
 
-                self.page = await context.new_page()
+                    context = await launch_persistent_context_async(
+                        profile_dir,
+                        headless=headless,
+                        proxy=proxy_url,
+                        humanize=humanize,
+                        geoip=geoip,
+                        args=[f'--fingerprint={fingerprint_seed}'],
+                        accept_downloads=False,
+                        bypass_csp=True,
+                        extra_http_headers=request_headers or {},
+                        ignore_https_errors=True,
+                        service_workers=os.getenv('PLAYWRIGHT_SERVICE_WORKERS', 'allow'),
+                        user_agent=manage_user_agent(headers=request_headers or {}),
+                    )
+
+                    # Playwright persistent contexts may already contain an
+                    # initial blank page. Reuse it rather than creating another.
+                    if context.pages:
+                        self.page = context.pages[0]
+                    else:
+                        self.page = await context.new_page()
+
+                    logger.debug(
+                        f"CloakBrowser > Using persistent profile {profile_dir} "
+                        f"with fingerprint seed {fingerprint_seed}"
+                    )
+
+                else:
+                    browser = await launch_async(
+                        headless=headless,
+                        proxy=proxy_url,
+                        humanize=humanize,
+                        geoip=geoip,
+                    )
+
+                    # CloakBrowser returns standard Playwright browser objects —
+                    # new_context() and all page methods work identically to Playwright
+                    context = await browser.new_context(
+                        accept_downloads=False,
+                        bypass_csp=True,
+                        extra_http_headers=request_headers or {},
+                        ignore_https_errors=True,
+                        service_workers=os.getenv('PLAYWRIGHT_SERVICE_WORKERS', 'allow'),
+                        user_agent=manage_user_agent(headers=request_headers or {}),
+                    )
+
+                    self.page = await context.new_page()
                 self.page.on(
                     "console",
                     lambda msg: logger.debug(f"CloakBrowser console: {url} {msg.type}: {msg.text} {msg.args}"),
@@ -316,10 +366,24 @@ def register_content_fetcher():
                     except Exception:
                         pass
 
-                    self.xpath_data = await self.page.evaluate(XPATH_ELEMENT_JS, {
-                        "visualselector_xpath_selectors": visualselector_xpath_selectors,
-                        "max_height": MAX_TOTAL_HEIGHT,
-                    })
+                    try:
+                        self.xpath_data = await self.page.evaluate(XPATH_ELEMENT_JS, {
+                            "visualselector_xpath_selectors": visualselector_xpath_selectors,
+                            "max_height": MAX_TOTAL_HEIGHT,
+                        })
+                    except TypeError as e:
+                        # Some denied/interstitial pages leave the DOM in a shape
+                        # the changedetection XPath helper cannot process. Surface
+                        # that as a fetch error instead of an opaque worker crash.
+                        logger.warning(
+                            f"CloakBrowser > XPath extraction failed for {url}: {e}"
+                        )
+                        raise PageUnloadable(
+                            url=url,
+                            status_code=self.status_code,
+                            message=f"CloakBrowser XPath extraction failed: {e}",
+                        )
+
                     try:
                         await self.page.request_gc()
                     except Exception:
