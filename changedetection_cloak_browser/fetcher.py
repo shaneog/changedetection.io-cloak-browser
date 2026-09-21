@@ -144,14 +144,77 @@ def register_content_fetcher():
             """Convert this instance's proxy dict to a URL string for CloakBrowser."""
             return self._proxy_dict_to_url(self.proxy)
 
+        async def _capture_screenshot(self, watch_uuid=None):
+            """Capture a screenshot without requiring Playwright viewport emulation.
+
+            CloakBrowser headed persistent contexts intentionally use no_viewport so
+            the page tracks the real OS window. In that mode page.viewport_size is
+            None, while changedetection's capture_full_page_async() assumes a dict.
+            Preserve Cloak's real-window behavior and use Playwright directly as a
+            fallback.
+            """
+            if self.page.viewport_size is not None:
+                return await capture_full_page_async(
+                    page=self.page,
+                    screenshot_format=self.screenshot_format,
+                    watch_uuid=watch_uuid,
+                    lock_viewport_elements=self.lock_viewport_elements,
+                )
+
+            screenshot_type = (
+                self.screenshot_format.lower()
+                if self.screenshot_format
+                else 'jpeg'
+            )
+
+            max_height = int(
+                os.getenv("SCREENSHOT_MAX_HEIGHT", SCREENSHOT_MAX_HEIGHT_DEFAULT)
+            )
+
+            dimensions = await self.page.evaluate("""
+                () => ({
+                    width: Math.max(
+                        document.documentElement.scrollWidth,
+                        document.body ? document.body.scrollWidth : 0,
+                        window.innerWidth
+                    ),
+                    height: Math.max(
+                        document.documentElement.scrollHeight,
+                        document.body ? document.body.scrollHeight : 0,
+                        window.innerHeight
+                    )
+                })
+            """)
+
+            kwargs = {
+                'type': screenshot_type,
+            }
+
+            if screenshot_type == 'jpeg':
+                kwargs['quality'] = int(os.getenv("SCREENSHOT_QUALITY", 72))
+
+            if dimensions and dimensions['height'] > max_height:
+                kwargs['clip'] = {
+                    'x': 0,
+                    'y': 0,
+                    'width': dimensions['width'],
+                    'height': max_height,
+                }
+            else:
+                kwargs['full_page'] = True
+
+            logger.debug(
+                f"CloakBrowser > Capturing screenshot without viewport emulation "
+                f"(dimensions={dimensions}, max_height={max_height})"
+            )
+
+            return await self.page.screenshot(**kwargs)
+
         async def screenshot_step(self, step_n=''):
             super().screenshot_step(step_n=step_n)
             watch_uuid = getattr(self, 'watch_uuid', None)
-            screenshot = await capture_full_page_async(
-                page=self.page,
-                screenshot_format=self.screenshot_format,
+            screenshot = await self._capture_screenshot(
                 watch_uuid=watch_uuid,
-                lock_viewport_elements=self.lock_viewport_elements,
             )
             try:
                 await self.page.request_gc()
@@ -335,11 +398,8 @@ def register_content_fetcher():
                         logger.error(f"CloakBrowser > Error fetching favicon: {e}, continuing.")
 
                 if self.status_code != 200 and not ignore_status_codes:
-                    screenshot = await capture_full_page_async(
-                        self.page,
-                        screenshot_format=self.screenshot_format,
+                    screenshot = await self._capture_screenshot(
                         watch_uuid=watch_uuid,
-                        lock_viewport_elements=self.lock_viewport_elements,
                     )
                     raise Non200ErrorCodeReceived(url=url, status_code=self.status_code, screenshot=screenshot)
 
@@ -403,11 +463,8 @@ def register_content_fetcher():
 
                     logger.debug(f"CloakBrowser > Scraped xPath/instock data in {time.time() - now:.2f}s")
 
-                    self.screenshot = await capture_full_page_async(
-                        page=self.page,
-                        screenshot_format=self.screenshot_format,
+                    self.screenshot = await self._capture_screenshot(
                         watch_uuid=watch_uuid,
-                        lock_viewport_elements=self.lock_viewport_elements,
                     )
                     try:
                         await self.page.request_gc()

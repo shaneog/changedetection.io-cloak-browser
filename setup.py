@@ -9,7 +9,7 @@ with open(os.path.join(here, 'README.md'), encoding='utf-8') as f:
 
 setup(
     name='changedetection.io-cloak-browser',
-    version='0.1.1.post2',
+    version='0.1.1.post3',
     description='CloakBrowser stealth fetcher plugin for changedetection.io.',
     long_description=long_description,
     long_description_content_type='text/markdown',
