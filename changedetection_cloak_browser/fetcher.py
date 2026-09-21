@@ -112,10 +112,17 @@ def register_content_fetcher():
             humanize_raw = os.getenv('CLOAKBROWSER_HUMANIZE', 'true').lower()
             humanize = humanize_raw not in ('false', '0', 'no')
 
+            headless_raw = os.getenv('CLOAKBROWSER_HEADLESS', 'true').lower()
+            headless = headless_raw not in ('false', '0', 'no')
+
+            geoip_raw = os.getenv('CLOAKBROWSER_GEOIP', 'false').lower()
+            geoip = geoip_raw not in ('false', '0', 'no')
+
             browser = await launch_async(
-                headless=True,
+                headless=headless,
                 proxy=proxy_url,
                 humanize=humanize,
+                geoip=geoip,
             )
             return (browser, None)
 
@@ -202,11 +209,18 @@ def register_content_fetcher():
             humanize_raw = os.getenv('CLOAKBROWSER_HUMANIZE', 'true').lower()
             humanize = humanize_raw not in ('false', '0', 'no')
 
+            headless_raw = os.getenv('CLOAKBROWSER_HEADLESS', 'true').lower()
+            headless = headless_raw not in ('false', '0', 'no')
+
+            geoip_raw = os.getenv('CLOAKBROWSER_GEOIP', 'false').lower()
+            geoip = geoip_raw not in ('false', '0', 'no')
+
             try:
                 browser = await launch_async(
-                    headless=True,
+                    headless=headless,
                     proxy=proxy_url,
                     humanize=humanize,
+                    geoip=geoip,
                 )
 
                 # CloakBrowser returns standard Playwright browser objects —

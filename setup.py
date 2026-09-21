@@ -9,7 +9,7 @@ with open(os.path.join(here, 'README.md'), encoding='utf-8') as f:
 
 setup(
     name='changedetection.io-cloak-browser',
-    version='0.1.1',
+    version='0.1.1.post1',
     description='CloakBrowser stealth fetcher plugin for changedetection.io.',
     long_description=long_description,
     long_description_content_type='text/markdown',
@@ -23,7 +23,7 @@ setup(
     },
     install_requires=[
         'changedetection.io>=0.54.6',
-        'cloakbrowser>=0.3.0',
+        'cloakbrowser[geoip]>=0.5.10',
         'playwright>=1.40.0',
     ],
     # Register as a changedetectionio plugin via entry_points
