@@ -11,6 +11,79 @@ from changedetectionio.pluggy_interface import hookimpl
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), 'static')
 
 
+async def _acquire_cloak_session_lock(label):
+    """Serialize CloakBrowser sessions across workers and browser-steps loops.
+
+    asyncio.Lock cannot safely coordinate the different event loops used by
+    changedetection. flock is kernel-backed and also protects us if the app
+    later uses multiple processes.
+    """
+    import fcntl
+
+    lock_path = os.getenv(
+        'CLOAKBROWSER_SESSION_LOCK_FILE',
+        '/tmp/changedetection-cloakbrowser-session.lock',
+    )
+    timeout = float(os.getenv('CLOAKBROWSER_SESSION_LOCK_TIMEOUT', '120'))
+
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    waiting_logged = False
+
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, f"pid={os.getpid()} label={label}\n".encode())
+
+            logger.debug(
+                f"CloakBrowser > Acquired session lock for {label}"
+            )
+            return fd
+
+        except BlockingIOError:
+            if loop.time() >= deadline:
+                try:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    owner = os.read(fd, 512).decode(errors='replace').strip()
+                except Exception:
+                    owner = 'unknown'
+
+                os.close(fd)
+
+                raise RuntimeError(
+                    f"CloakBrowser session busy for more than {timeout:.0f}s "
+                    f"(owner: {owner or 'unknown'})"
+                )
+
+            if not waiting_logged:
+                logger.debug(
+                    f"CloakBrowser > Waiting for session lock for {label}"
+                )
+                waiting_logged = True
+
+            await asyncio.sleep(0.25)
+
+
+def _release_cloak_session_lock(fd, label):
+    if fd is None:
+        return
+
+    import fcntl
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+    logger.debug(
+        f"CloakBrowser > Released session lock for {label}"
+    )
+
+
 @hookimpl
 def plugin_static_path():
     """Return the path to this plugin's static files directory."""
@@ -119,12 +192,40 @@ def register_content_fetcher():
             geoip_raw = os.getenv('CLOAKBROWSER_GEOIP', 'false').lower()
             geoip = geoip_raw not in ('false', '0', 'no')
 
-            browser = await launch_async(
-                headless=headless,
-                proxy=proxy_url,
-                humanize=humanize,
-                geoip=geoip,
-            )
+            lock_label = 'browser-steps/live-preview'
+            session_lock_fd = await _acquire_cloak_session_lock(lock_label)
+
+            try:
+                browser = await launch_async(
+                    headless=headless,
+                    proxy=proxy_url,
+                    humanize=humanize,
+                    geoip=geoip,
+                )
+            except Exception:
+                _release_cloak_session_lock(session_lock_fd, lock_label)
+                raise
+
+            # changedetection closes this Browser later when the browser-steps
+            # session expires or is explicitly cleaned up. Release the Cloak
+            # session gate at exactly the same lifecycle boundary.
+            original_close = browser.close
+            lock_released = False
+
+            async def close_with_session_unlock(*args, **kwargs):
+                nonlocal lock_released
+                try:
+                    return await original_close(*args, **kwargs)
+                finally:
+                    if not lock_released:
+                        _release_cloak_session_lock(
+                            session_lock_fd,
+                            lock_label,
+                        )
+                        lock_released = True
+
+            browser.close = close_with_session_unlock
+
             return (browser, None)
 
         @staticmethod
@@ -267,6 +368,8 @@ def register_content_fetcher():
             browser = None
             context = None
             response = None
+            session_lock_fd = None
+            session_lock_label = f'watch {watch_uuid or "unknown"}'
 
             proxy_url = self._build_proxy_url()
 
@@ -281,6 +384,10 @@ def register_content_fetcher():
 
             persistent_raw = os.getenv('CLOAKBROWSER_PERSISTENT', 'false').lower()
             persistent = persistent_raw not in ('false', '0', 'no')
+
+            session_lock_fd = await _acquire_cloak_session_lock(
+                session_lock_label
+            )
 
             try:
                 if persistent:
@@ -492,7 +599,10 @@ def register_content_fetcher():
 
                 try:
                     if context:
-                        await asyncio.wait_for(context.close(), timeout=5.0)
+                        await asyncio.wait_for(context.close(), timeout=10.0)
+                        logger.debug(
+                            f"CloakBrowser > Successfully closed context for {url}"
+                        )
                 except asyncio.TimeoutError:
                     logger.warning(f"CloakBrowser > Timed out closing context for {url}")
                 except Exception as e:
@@ -502,13 +612,23 @@ def register_content_fetcher():
 
                 try:
                     if browser:
-                        await asyncio.wait_for(browser.close(), timeout=5.0)
+                        await asyncio.wait_for(browser.close(), timeout=10.0)
+                        logger.debug(
+                            f"CloakBrowser > Successfully closed browser for {url}"
+                        )
                 except asyncio.TimeoutError:
                     logger.warning(f"CloakBrowser > Timed out closing browser for {url}")
                 except Exception as e:
                     logger.warning(f"CloakBrowser > Error closing browser for {url}: {e}")
                 finally:
                     browser = None
+
+                if session_lock_fd is not None:
+                    _release_cloak_session_lock(
+                        session_lock_fd,
+                        session_lock_label,
+                    )
+                    session_lock_fd = None
 
                 gc.collect()
 
