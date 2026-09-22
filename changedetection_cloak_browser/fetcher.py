@@ -541,10 +541,85 @@ def register_content_fetcher():
                         logger.error(f"CloakBrowser > Error fetching favicon: {e}, continuing.")
 
                 if self.status_code != 200 and not ignore_status_codes:
+                    # Diagnostic logging for top-level denials. Do not log cookie
+                    # values or arbitrary response headers.
+                    diagnostic_headers = {}
+                    interesting_exact = {
+                        'server',
+                        'via',
+                        'location',
+                        'content-type',
+                        'x-cache',
+                        'x-cache-hits',
+                        'x-served-by',
+                        'x-cdn',
+                        'x-timer',
+                        'akamai-grn',
+                        'x-true-cache-key',
+                        'cf-ray',
+                        'cf-cache-status',
+                        'x-amz-cf-id',
+                        'x-amz-cf-pop',
+                    }
+                    interesting_prefixes = (
+                        'x-akamai-',
+                        'x-px-',
+                        'x-sucuri-',
+                    )
+
+                    for key, value in (self.headers or {}).items():
+                        key_lower = key.lower()
+                        if (
+                            key_lower in interesting_exact
+                            or key_lower.startswith(interesting_prefixes)
+                        ):
+                            diagnostic_headers[key_lower] = value
+
+                    cookie_names = []
+                    try:
+                        for header in await response.headers_array():
+                            if header['name'].lower() == 'set-cookie':
+                                cookie_name = header['value'].split('=', 1)[0].strip()
+                                if cookie_name and cookie_name not in cookie_names:
+                                    cookie_names.append(cookie_name)
+                    except Exception as e:
+                        logger.debug(
+                            f"CloakBrowser > Could not inspect Set-Cookie names: {e}"
+                        )
+
+                    try:
+                        page_title = await self.page.title()
+                    except Exception:
+                        page_title = '<unavailable>'
+
+                    try:
+                        body_text = await self.page.locator('body').inner_text(
+                            timeout=2000
+                        )
+                        body_excerpt = ' '.join(body_text.split())[:800]
+                    except Exception:
+                        body_excerpt = '<unavailable>'
+
+                    logger.warning(
+                        "CloakBrowser > Non-200 top-level response: "
+                        f"requested_url={url!r} "
+                        f"response_url={getattr(response, 'url', None)!r} "
+                        f"page_url={self.page.url!r} "
+                        f"status={self.status_code} "
+                        f"title={page_title!r} "
+                        f"headers={diagnostic_headers!r} "
+                        f"set_cookie_names={cookie_names!r} "
+                        f"body_excerpt={body_excerpt!r}"
+                    )
+
                     screenshot = await self._capture_screenshot(
                         watch_uuid=watch_uuid,
                     )
-                    raise Non200ErrorCodeReceived(url=url, status_code=self.status_code, screenshot=screenshot)
+                    raise Non200ErrorCodeReceived(
+                        url=url,
+                        status_code=self.status_code,
+                        screenshot=screenshot,
+                    )
 
                 if not empty_pages_are_a_change and len((await self.page.content()).strip()) == 0:
                     raise EmptyReply(url=url, status_code=response.status)
