@@ -192,6 +192,18 @@ def register_content_fetcher():
             geoip_raw = os.getenv('CLOAKBROWSER_GEOIP', 'false').lower()
             geoip = geoip_raw not in ('false', '0', 'no')
 
+            windows_font_metrics_raw = os.getenv(
+                'CLOAKBROWSER_WINDOWS_FONT_METRICS',
+                'false',
+            ).lower()
+            windows_font_metrics = windows_font_metrics_raw not in (
+                'false', '0', 'no'
+            )
+
+            launch_args = []
+            if windows_font_metrics:
+                launch_args.append('--fingerprint-windows-font-metrics')
+
             lock_label = 'browser-steps/live-preview'
             session_lock_fd = await _acquire_cloak_session_lock(lock_label)
 
@@ -201,6 +213,7 @@ def register_content_fetcher():
                     proxy=proxy_url,
                     humanize=humanize,
                     geoip=geoip,
+                    args=launch_args,
                 )
             except Exception:
                 _release_cloak_session_lock(session_lock_fd, lock_label)
@@ -385,6 +398,14 @@ def register_content_fetcher():
             persistent_raw = os.getenv('CLOAKBROWSER_PERSISTENT', 'false').lower()
             persistent = persistent_raw not in ('false', '0', 'no')
 
+            windows_font_metrics_raw = os.getenv(
+                'CLOAKBROWSER_WINDOWS_FONT_METRICS',
+                'false',
+            ).lower()
+            windows_font_metrics = windows_font_metrics_raw not in (
+                'false', '0', 'no'
+            )
+
             session_lock_fd = await _acquire_cloak_session_lock(
                 session_lock_label
             )
@@ -408,13 +429,21 @@ def register_content_fetcher():
                     digest = hashlib.sha256(profile_key.encode('utf-8')).hexdigest()
                     fingerprint_seed = 10000 + (int(digest[:8], 16) % 90000)
 
+                    persistent_args = [
+                        f'--fingerprint={fingerprint_seed}',
+                    ]
+                    if windows_font_metrics:
+                        persistent_args.append(
+                            '--fingerprint-windows-font-metrics'
+                        )
+
                     context = await launch_persistent_context_async(
                         profile_dir,
                         headless=headless,
                         proxy=proxy_url,
                         humanize=humanize,
                         geoip=geoip,
-                        args=[f'--fingerprint={fingerprint_seed}'],
+                        args=persistent_args,
                         accept_downloads=False,
                         bypass_csp=True,
                         extra_http_headers=request_headers or {},
@@ -436,11 +465,18 @@ def register_content_fetcher():
                     )
 
                 else:
+                    launch_args = []
+                    if windows_font_metrics:
+                        launch_args.append(
+                            '--fingerprint-windows-font-metrics'
+                        )
+
                     browser = await launch_async(
                         headless=headless,
                         proxy=proxy_url,
                         humanize=humanize,
                         geoip=geoip,
+                        args=launch_args,
                     )
 
                     # CloakBrowser returns standard Playwright browser objects —
